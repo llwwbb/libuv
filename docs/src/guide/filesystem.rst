@@ -1,11 +1,14 @@
+文件系统
 Filesystem
 ==========
-
+简单的文件系统读/写由uv_fs_ *函数和uv_fs_t结构实现。
 Simple filesystem read/write is achieved using the ``uv_fs_*`` functions and the
 ``uv_fs_t`` struct.
 
 .. note::
-
+    libuv文件系统操作不同于:doc:`socket operations <networking>`.
+    套接字操作使用操作系统提供的的非阻塞操作。文件系统操作内部使用阻塞函数，但是在线程池中调用，
+    在应用交互需要的时候通知注册在事件循环上的观察者。
     The libuv filesystem operations are different from :doc:`socket operations
     <networking>`. Socket operations use the non-blocking operations provided
     by the operating system. Filesystem operations use blocking functions
@@ -14,41 +17,43 @@ Simple filesystem read/write is achieved using the ``uv_fs_*`` functions and the
     required.
 
 .. _thread pool: http://docs.libuv.org/en/v1.x/threadpool.html#thread-pool-work-scheduling
-
+所有文件系统功能都有两种形式-同步和异步。
 All filesystem functions have two forms - *synchronous* and *asynchronous*.
-
+同步模式会自动调用（并阻塞）如果回调为空。函数的返回值是:ref:`libuv error code <libuv-error-handling>`.
+这通常是同步调用的唯一用途。异步模式会在传递回调并且返回值为0时调用。
 The *synchronous* forms automatically get called (and **block**) if the
 callback is null. The return value of functions is a :ref:`libuv error code
 <libuv-error-handling>`. This is usually only useful for synchronous calls.
 The *asynchronous* form is called when a callback is passed and the return
 value is 0.
-
+读/写文件
 Reading/Writing files
 ---------------------
-
+文件描述符可使用以下函数获取。
 A file descriptor is obtained using
 
 .. code-block:: c
 
     int uv_fs_open(uv_loop_t* loop, uv_fs_t* req, const char* path, int flags, int mode, uv_fs_cb cb)
-
+``flags`` and ``mode``是标准unix flags
 ``flags`` and ``mode`` are standard
 `Unix flags <http://man7.org/linux/man-pages/man2/open.2.html>`_.
+libuv负责转换为适当的Windows flags。
 libuv takes care of converting to the appropriate Windows flags.
-
+文件描述符使用下面的函数关闭
 File descriptors are closed using
 
 .. code-block:: c
 
     int uv_fs_close(uv_loop_t* loop, uv_fs_t* req, uv_file file, uv_fs_cb cb)
 
-
+文件系统回调签名如下
 Filesystem operation callbacks have the signature:
 
 .. code-block:: c
 
     void callback(uv_fs_t* req);
-
+让我们看一个``cat``的简单实现。由注册一个打开文件的回调开始。
 Let's see a simple implementation of ``cat``. We start with registering
 a callback for when the file is opened:
 
@@ -57,7 +62,8 @@ a callback for when the file is opened:
     :linenos:
     :lines: 41-53
     :emphasize-lines: 4, 6-7
-
+在``uv_fs_open``的回调中，``uv_fs_t``的``result``字段就是文件描述符。
+如果文件成功打开，就开始读取。
 The ``result`` field of a ``uv_fs_t`` is the file descriptor in case of the
 ``uv_fs_open`` callback. If the file is successfully opened, we start reading it.
 
@@ -66,20 +72,25 @@ The ``result`` field of a ``uv_fs_t`` is the file descriptor in case of the
     :linenos:
     :lines: 26-40
     :emphasize-lines: 2,8,12
-
+在读取调用中，你需要传入一个初始化好的buffer，在读回调触发前，会被填入数据。
+``uv_fs_*``操作几乎直接映射到某些POSIX函数，所以在这种情况下EOF由``result``为0表示。
+在流或管道的情况下，UV_EOF常数将作为状态传递。
 In the case of a read call, you should pass an *initialized* buffer which will
 be filled with data before the read callback is triggered. The ``uv_fs_*``
 operations map almost directly to certain POSIX functions, so EOF is indicated
 in this case by ``result`` being 0. In the case of streams or pipes, the
 ``UV_EOF`` constant would have been passed as a status instead.
-
+这里你看到了异步编程的常见模式。``uv_fs_close()``调用是同步的。通常，一次完成，或者作为启动或关闭阶段完成的任务是同步的，
+因为当程序执行其主要任务并处理多路I/O源时，我们才对快速I/O感兴趣。
+对于单个任务，性能差异通常可以忽略不计，还可能使代码更简洁。
 Here you see a common pattern when writing asynchronous programs. The
 ``uv_fs_close()`` call is performed synchronously. *Usually tasks which are
 one-off, or are done as part of the startup or shutdown stage are performed
 synchronously, since we are interested in fast I/O when the program is going
 about its primary task and dealing with multiple I/O sources*. For solo tasks
 the performance difference usually is negligible and may lead to simpler code.
-
+使用``uv_fs_write()``进行文件写同样简单。写入完成后回调会被触发。
+在我们的例子中，回调只是驱动下一次读取。 因此，读取和写入通过回调以锁步方式进行。
 Filesystem writing is similarly simple using ``uv_fs_write()``.  *Your callback
 will be triggered after the write is complete*.  In our case the callback
 simply drives the next read. Thus read and write proceed in lockstep via
@@ -92,10 +103,10 @@ callbacks.
     :emphasize-lines: 6
 
 .. warning::
-
+    由于为提高性能而对文件系统和磁盘驱动器进行的配置，一个成功的写入可能尚未提交到磁盘。
     Due to the way filesystems and disk drives are configured for performance,
     a write that 'succeeds' may not be committed to disk yet.
-
+我们设置多米诺骨牌在``main()``中滚动。
 We set the dominos rolling in ``main()``:
 
 .. rubric:: uvcat/main.c
@@ -105,13 +116,14 @@ We set the dominos rolling in ``main()``:
     :emphasize-lines: 2
 
 .. warning::
-
+在文件系统的请求中，必须始终调用``uv_fs_req_cleanup()``函数，来释放libuv中申请的内部内存。
     The ``uv_fs_req_cleanup()`` function must always be called on filesystem
     requests to free internal memory allocations in libuv.
-
+文件系统操作
 Filesystem operations
 ---------------------
-
+所有标准文件系统操作像``unlink``, ``rmdir``, ``stat``都支持异步，有直观的参数顺序。
+它们与读取/写入/打开调用遵循相同的模式，在uv_fs_t.result字段中返回结果。完整清单：
 All the standard filesystem operations like ``unlink``, ``rmdir``, ``stat`` are
 supported asynchronously and have intuitive argument order. They follow the
 same patterns as the read/write/open calls, returning the result in the
@@ -160,10 +172,10 @@ same patterns as the read/write/open calls, returning the result in the
 
 Buffers and Streams
 -------------------
-
+在libuv中，基础I/O handle是流(``uv_stream_t``)。TCP套接字，UDP套接字，文件I/O管道和IPC都视为流的子类。
 The basic I/O handle in libuv is the stream (``uv_stream_t``). TCP sockets, UDP
 sockets, and pipes for file I/O and IPC are all treated as stream subclasses.
-
+使用每个子类的自定义函数初始化流，然后使用下面的代码执行操作。
 Streams are initialized using custom functions for each subclass, then operated
 upon using
 
@@ -173,11 +185,12 @@ upon using
     int uv_read_stop(uv_stream_t*);
     int uv_write(uv_write_t* req, uv_stream_t* handle,
                  const uv_buf_t bufs[], unsigned int nbufs, uv_write_cb cb);
-
+基于流的函数比文件系统函数更易于使用，当``uv_read_start()``被调用一次，libuv就会自动保持从流中读取数据，直到调用``uv_read_stop()``。
 The stream based functions are simpler to use than the filesystem ones and
 libuv will automatically keep reading from a stream when ``uv_read_start()`` is
 called once, until ``uv_read_stop()`` is called.
-
+数据的离散单位是buffer -- ``uv_buf_t``.它是一个指向bytes的指针(``uv_buf_t.base``)和长度(``uv_buf_t.len``)的简单集合。
+``uv_buf_t``轻量级，值传递。需要管理的是实际的bytes，必须由应用程序来分配和释放。
 The discrete unit of data is the buffer -- ``uv_buf_t``. This is simply
 a collection of a pointer to bytes (``uv_buf_t.base``) and the length
 (``uv_buf_t.len``). The ``uv_buf_t`` is lightweight and passed around by value.
